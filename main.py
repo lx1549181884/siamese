@@ -12,15 +12,15 @@ from torch import nn, optim
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import Dataset
 
-Authorization = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE2ODYxMDEwMDcsInVzZXJuYW1lIjoibGlueGluZyJ9.O1yDvcXN-LqiCa8qfomLYiIw8PAPg79Njj6c8e2j3Fg'
-SIZE = 30
+Authorization = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJleHAiOjE2ODYyODIzOTQsInVzZXJuYW1lIjoibGlueGluZyJ9.llBaxyCBxBC_aM95ij5iNuC5iOKUjvQD5miJUMtWbQY'
+SIZE = 100
 IMG_HOST = 'https://img.duibu.cn/'
 IMG_DIR = 'duibu/product/images/'
 IMG_DIR_5_0 = 'duibu/product/images_5_0/'
 
-BATCH_SIZE = 64
-LEARNING_RATE = 1.0
-EPOCHS = 1
+BATCH_SIZE = 128
+LEARNING_RATE = 0.1
+EPOCHS = 10
 GAMMA = 0.7
 
 
@@ -78,6 +78,7 @@ class APP_MATCHER(Dataset):
             if matchObj:
                 img = cv2.imread(IMG_DIR_5_0 + imageName, cv2.IMREAD_GRAYSCALE)
                 img = cv2.resize(img, (224, 224))
+                # img = img[:224, :224]
                 imgData = [img]
                 self.ids.append(matchObj.group(1))
                 self.data.append(imgData)
@@ -85,8 +86,14 @@ class APP_MATCHER(Dataset):
         self.ids = np.array(self.ids)
         self.info = []
         for i in range(len(self.data)):
+            count = 0
             for j in range(i, len(self.data)):
                 target = 1 if self.ids[i] == self.ids[j] else 0
+                if self.ids[i] == self.ids[j]:
+                    count += 1
+                else:
+                    count -= 1
+                if count < 0: break
                 self.info.append((i, j, target))
 
     def __len__(self):
@@ -131,7 +138,7 @@ def test(model, device, test_loader):
             pred = torch.where(outputs > 0.5, 1, 0)  # get the index of the max log-probability
             correct += pred.eq(targets.view_as(pred)).sum().item()
     test_loss /= len(test_loader.dataset)
-    print('\nTest set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n'.format(
+    print('Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)'.format(
         test_loss, correct, len(test_loader.dataset),
         100. * correct / len(test_loader.dataset)))
 
@@ -143,7 +150,7 @@ def download():
     }
     body = {
         "deviceDescVersion": "3.0.0",
-        "page": 1,
+        "page": 3,
         "size": SIZE
     }
     response = requests.post(url, headers=header, json=body)
@@ -161,16 +168,18 @@ def download():
     if not os.path.exists(IMG_DIR):
         os.mkdir(IMG_DIR)
     for index, path in enumerate(imagePaths):
-        path = path[1:]
-        if os.path.exists(path):
-            log(f'{path} already exists')
-            continue
-        url = IMG_HOST + path
-        log(f'download index={index} {url}')
-        r = requests.get(url)
-        with open(path, 'wb') as file:
-            file.write(r.content)
-        # time.sleep(1)
+        matchObj = re.match(r'.+(\d+_.+)_(\d+)_(\d+)_(\d+).jpg', path)
+        if matchObj.group(2) == '5' and matchObj.group(3) == '0':
+            path = path[1:]
+            if os.path.exists(path):
+                log(f'{path} already exists')
+                continue
+            url = IMG_HOST + path
+            log(f'download index={index} {url}')
+            r = requests.get(url)
+            with open(path, 'wb') as file:
+                file.write(r.content)
+            # time.sleep(1)
 
 
 def pick():
@@ -179,7 +188,7 @@ def pick():
     imageNames = os.listdir(IMG_DIR)
     labels = set()
     for index, imageName in enumerate(imageNames):
-        matchObj = re.match(r'(\d+_\d+)_(\d+)_(\d+)_(\d+).jpg', imageName)
+        matchObj = re.match(r'(\d+_.+)_(\d+)_(\d+)_(\d+).jpg', imageName)
         if matchObj.group(2) == '5' and matchObj.group(3) == '0':
             labels.add(matchObj.group(1))
             oldPath = IMG_DIR + imageName
@@ -194,8 +203,8 @@ def pick():
 
 if __name__ == '__main__':
     log('start')
-    # download()
-    # pick()
+    download()
+    pick()
 
     use_cuda = torch.cuda.is_available()
     use_mps = torch.backends.mps.is_available()
@@ -206,18 +215,25 @@ if __name__ == '__main__':
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-
+    log(f'device {device}')
     train_dataset = APP_MATCHER(IMG_DIR_5_0, True)
+    log(f'train_dataset len {train_dataset.__len__()}')
+    log(f'train_dataset data shape {train_dataset.data.shape}')
     test_dataset = APP_MATCHER(IMG_DIR_5_0, False)
+    log(f'test_dataset len {test_dataset.__len__()}')
+    log(f'test_dataset data shape {test_dataset.data.shape}')
     train_loader = torch.utils.data.DataLoader(train_dataset, **{'batch_size': BATCH_SIZE})
     test_loader = torch.utils.data.DataLoader(test_dataset, **{'batch_size': BATCH_SIZE})
 
     model = SiameseNetwork().to(device)
     optimizer = optim.Adadelta(model.parameters(), lr=LEARNING_RATE)
 
+    test(model, device, train_loader)
+    test(model, device, test_loader)
     scheduler = StepLR(optimizer, step_size=1, gamma=GAMMA)
     for epoch in range(1, EPOCHS + 1):
         train(model, device, train_loader, optimizer, epoch)
+        test(model, device, train_loader)
         test(model, device, test_loader)
         scheduler.step()
     torch.save(model.state_dict(), "siamese_network.pt")
